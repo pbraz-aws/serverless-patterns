@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Eventbridge Pipes configuration to send events from DynamoDB Streams to Eventbridge default bus
+
+Parameters:
+  EventSourceName:
+    Type: String
+    Description: Name of the event source
+    Default: "myapp.users"
+
+Resources:
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: "S"
+        - AttributeName: SK
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  
+  # Eventbridge Pipe IAM role for allowing access to Dynamo Stream to send event to default event bus
+  PipeIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - pipes.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: SourceDynamoStreamReadAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource: !GetAtt DynamoDBTable.StreamArn
+        - PolicyName: EventBridgePutEvents
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: "*"
+
+  UserDeletedPipe:
+    Type: AWS::Pipes::Pipe
+    Properties:
+      RoleArn: !GetAtt PipeIAMRole.Arn
+      Source: !GetAtt DynamoDBTable.StreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          StartingPosition: LATEST
+          BatchSize: 1
+        FilterCriteria:
+          Filters:
+            - Pattern: >-
+                {"eventName": ["REMOVE"], "dynamodb": {"Keys": {"PK": {"S": [{"prefix": "USER#"}]}}}}
+      Target: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+      TargetParameters:
+        InputTemplate: |-
+          {
+            "userId": <$.dynamodb.Keys.PK.S>
+          }
+        EventBridgeEventBusParameters:
+          DetailType: "UserDeleted"
+          Source: !Ref EventSourceName
+
+  UserCreatedPipe:
+    Type: AWS::Pipes::Pipe
+    Properties:
+      RoleArn: !GetAtt PipeIAMRole.Arn
+      Source: !GetAtt DynamoDBTable.StreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 1
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: >-
+                {"eventName": ["INSERT"], "dynamodb": {"Keys": {"PK": {"S": [{"prefix": "USER#"}]}}}}
+      Target: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+      TargetParameters:
+        InputTemplate: |-
+          {
+            "userId": <$.dynamodb.Keys.PK.S>
+          }
+        EventBridgeEventBusParameters:
+          DetailType: "UserCreated"
+          Source: !Ref EventSourceName
+
+  UserModifiedPipe:
+    Type: AWS::Pipes::Pipe
+    Properties:
+      RoleArn: !GetAtt PipeIAMRole.Arn
+      Source: !GetAtt DynamoDBTable.StreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 1
+          StartingPosition: LATEST
+        FilterCriteria:
+          Filters:
+            - Pattern: >- 
+                {"eventName": ["MODIFY"], "dynamodb": {"Keys": {"PK": {"S": [{"prefix": "USER#"}]}}}}
+      Target: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+      TargetParameters:
+        InputTemplate: |-
+          {
+            "userId": <$.dynamodb.Keys.PK.S>,
+            "oldImage": <$.dynamodb.OldImage>,
+            "newImage": <$.dynamodb.NewImage>
+          }
+        EventBridgeEventBusParameters:
+          DetailType: "UserModified"
+          Source: !Ref EventSourceName
+
